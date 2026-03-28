@@ -1,0 +1,2 @@
+# Optional: modern ttk themes for autoprimenet_gui.py (Python 3.7+).
+ttkbootstrap>=1.10.0

@@ -17,6 +17,7 @@ AutoPrimeNet (the PrimeNet program) was moved from the [Distributed Computing Sc
 
 * Interactive setup with a `--setup` option
 * Command line interface and configuration file
+* Optional Tk/tkinter launcher ([`autoprimenet_gui.py`](autoprimenet_gui.py)) that runs the same program in a subprocess
 * Automatically registers the instance with PrimeNet
 * PrimeNet/mersenne.org
 	* Supports all applicable [PrimeNet v5 API](https://v5.mersenne.org/v5design/v5webAPI_0.97.html) functionality
@@ -425,6 +426,17 @@ Notification Options:
   --test-email          Send a test e-mail message and exit
 ```
 
+## Optional graphical interface (tkinter)
+
+[`autoprimenet_gui.py`](autoprimenet_gui.py) is a small **optional** front end built with [tkinter](https://docs.python.org/3/library/tkinter.html). It does not import the main program (which is structured as a script); it **starts `autoprimenet.py`** (or a frozen `autoprimenet.exe`) with the arguments you choose and shows **stdout/stderr** in a scrollable window.
+
+**Run:** `python3 autoprimenet_gui.py` (or `python autoprimenet_gui.py`) from a directory where `autoprimenet.py` is present, or place **`autoprimenet_gui.exe` next to `autoprimenet.exe`** if you use the Windows PyInstaller builds from [`scripts/build_windows_exe.ps1`](scripts/build_windows_exe.ps1).
+
+**Requirements:** Tcl/Tk and tkinter are part of many Python installs. On Debian/Ubuntu you may need `sudo apt install python3-tk`. Python 2 can use `Tkinter` if available.
+
+For a more modern look on **Python 3**, install [ttkbootstrap](https://github.com/israel-dryer/ttkbootstrap): `pip install -r requirements-gui.txt`. If it is not installed, the GUI falls back to standard `tkinter.ttk`.
+
+The GUI covers common options (work directory, user ID, GIMPS program, workers, timeout, check-in interval, days of work, extra CLI tokens). For every flag, the **command line remains the full interface**.
 
 ## Contributing
 
@@ -441,7 +453,7 @@ Pull requests welcome! Ideas for contributions:
 * Support reporting interim residues.
 * Localize the program and translate the output into other languages (see [here](https://mersenneforum.org/showthread.php?t=27046)).
 * Adapt Loïc Le Loarer's [test suite](https://github.com/llloic11/primenet/tree/main/tests).
-* Add an optional GUI using [Tk](https://en.wikipedia.org/wiki/Tk_(software)) and the [tkinter library](https://docs.python.org/3/library/tkinter.html).
+* Extend the optional [tkinter](https://docs.python.org/3/library/tkinter.html) GUI ([`autoprimenet_gui.py`](autoprimenet_gui.py)) with more options or workflows.
 * Add docstrings to all functions.
 * Support encrypting passwords in the config file.
 * Support submitting P-1 results for Fermat numbers.
