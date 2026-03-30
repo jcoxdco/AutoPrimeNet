@@ -37,6 +37,7 @@ import sys
 import timeit
 from ctypes.util import find_library
 from datetime import datetime, timedelta
+from itertools import chain
 
 try:
 	# Python 2
@@ -288,7 +289,7 @@ GPUOWL_RE = re.compile(
 )
 PRPLL_RE = re.compile(r"(?:(?:ll-)?([0-9]+)" + re.escape(os.sep) + r"(?:([0-9]+)-([0-9]+)\.(?:ll|prp)|unverified\.prp))$")
 PRMERS_RE = re.compile(
-	r"^(?:(?:wagstaff_|llsafe_|pm1_(?:s2_)?)?m_([0-9]+)|ecm2?_(?:te_)?m_([0-9]+)_c([0-9]+))\.ckpt(?:\.(?:old|new))?$"
+	r"^(?:(?:wagstaff_|llsafe_)?m_([0-9]+)|pm1_(?:s[2-4]_)?m_([0-9]+)(?:_ext)?|ecm2?_(?:te_)?m_([0-9]+)_c([0-9]+))\.ckpt(?:\.(?:old|new))?$"
 )
 MFAKTC_RE = re.compile(r"^([MW][0-9]+)(?:_[0-9]+-[0-9]+_[0-9]+)?\.ckp$")
 MFAKTO_RE = re.compile(r"^(M[0-9]+)\.ckp(\.bu)?$")
@@ -737,7 +738,7 @@ def parse_work_unit_prime95(filename):
 		with open(filename, "rb") as f:
 			magicnum, wu.version, wu.k, wu.b, wu.n, wu.c, stage, pct_complete, filesum = unpack("<IIdIIi10sxxdI", f)
 
-			wu.stage = stage.rstrip(b"\0").decode()
+			wu.stage = stage.rstrip(b"\0").decode("utf-8")
 			wu.pct_complete = max(0, min(1, pct_complete))
 
 			if args.check or args.jacobi:
@@ -1252,7 +1253,7 @@ def parse_work_unit_prime95(filename):
 	except EOFError:
 		return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	return wu
@@ -1406,7 +1407,7 @@ def parse_work_unit_mlucas(filename, exponent, stage):
 	except EOFError:
 		return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	return wu
@@ -1466,7 +1467,7 @@ def parse_work_unit_cudalucas(filename, p):
 	except EOFError:
 		return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	return wu
@@ -1539,7 +1540,7 @@ def parse_work_unit_cudapm1(filename, p):
 	except EOFError:
 		return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	return wu
@@ -1753,7 +1754,7 @@ def parse_work_unit_gpuowl(filename):
 	except EOFError:
 		return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	if args.check and crc is not None:
@@ -1861,7 +1862,7 @@ def parse_work_unit_prpll(filename):
 	except EOFError:
 		return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	if args.check and crc is not None:
@@ -1875,7 +1876,7 @@ def parse_work_unit_prpll(filename):
 
 
 def transform_size(exponent):
-	"""Return a GpuOwl-style NTT transform size bound for exponent (min radix-2 and radix-5 limits under 64-bit)."""
+	"""Return a PrMers NTT transform size bound for exponent (min radix-2 and radix-5 limits under 64-bit)."""
 	log2_n = 1
 	while True:
 		log2_n += 1
@@ -1991,9 +1992,9 @@ def parse_work_unit_prmers(filename, exponent, curve):
 			elif name.startswith("pm1_s2_m_"):
 				wu.work_type = WORK_PMINUS1
 
-				version, p, B1u, B2u, _cur_p, cur_idx, et = unpack("=iIQQQQd", f)
+				version, p, B1u, B2u, _D, _cur_p, cur_idx, et = unpack("=iIQQQQQd", f)
 
-				if version != 1:
+				if version != 10:
 					logging.error("P-1 stage 2 savefile with unknown version = %s", version)
 					return None
 
@@ -2004,14 +2005,45 @@ def parse_work_unit_prmers(filename, exponent, curve):
 
 				wu.stage = "S2"
 				wu.pct_complete = wu.counter / prime_count_approx(B1u, B2u)
+			elif name.startswith("pm1_s3_m_"):
+				wu.work_type = WORK_PMINUS1
+
+				version, p, B3u, cur_b, et = unpack("=iIQQd", f)
+
+				if version != 2:
+					logging.error("P-1 stage 3 savefile with unknown version = %s", version)
+					return None
+
+				wu.state = PM1_STATE_DONE
+				wu.counter = cur_b
+
+				wu.stage = "S3"
+				wu.pct_complete = cur_b / B3u
+			elif name.startswith("pm1_s4_m_"):
+				wu.work_type = WORK_PMINUS1
+
+				version, p, _digits, _seed, tb, cur_i, et = unpack("=iIIQQQd", f)
+
+				if version != 1:
+					logging.error("P-1 stage 4 savefile with unknown version = %s", version)
+					return None
+
+				wu.state = PM1_STATE_DONE
+				wu.counter = cur_i
+
+				wu.stage = "S4"
+				wu.pct_complete = cur_i / tb
 			elif name.startswith(("ecm_m_", "ecm_te_m_")):
 				wu.work_type = WORK_ECM
 
-				version, p, i, nb, B1, et = unpack("=iIIIQd", f)
+				version, p, i, nb, B1, et, _curve_seed, _current_te_family_mode = unpack("=iIIIQdQB", f)
 
-				if version != 1:
+				if version not in {1, 5}:
 					logging.error("ECM stage 1 savefile with unknown version = %s", version)
 					return None
+
+				if version == 5:
+					(_te_stage1_flag,) = unpack("=B", f)
 
 				wu.state = ECM_STATE_STAGE1
 				wu.curve = curve + 1
@@ -2023,14 +2055,29 @@ def parse_work_unit_prmers(filename, exponent, curve):
 			elif name.startswith(("ecm2_m_", "ecm2_te_m_")):
 				wu.work_type = WORK_ECM
 
-				version, p, idx, cnt, B1, B2, et = unpack("=iIIIQQd", f)
+				version, p, idx, cnt, B1, B2 = unpack("=iIIIQQ", f)
 
-				if not 2 <= version <= 3:
+				if not 2 <= version <= 9:
 					logging.error("ECM stage 2 savefile with unknown version = %s", version)
 					return None
 
-				if version == 3:
-					_seed, _torsion = unpack("=QB", f)
+				if 5 <= version <= 9:
+					(
+						_curve_seed,
+						_current_te_family_mode,
+						et,
+						_in_chunk,
+						_chunk_start_idx,
+						_chunk_end_idx,
+						_chunk_bits_saved,
+						_chunk_steps_done_saved,
+					) = unpack("=QBdBIIII", f)
+				elif version == 4:
+					_curve_seed, _current_te_family_mode, et = unpack("=QBd", f)
+				elif version == 3:
+					et, _curve_seed, _current_te_family_mode = unpack("=dQB", f)
+				elif version == 2:
+					(et,) = unpack("=d", f)
 
 				wu.state = ECM_STATE_STAGE2
 				wu.curve = curve + 1
@@ -2046,7 +2093,7 @@ def parse_work_unit_prmers(filename, exponent, curve):
 	except EOFError:
 		return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	if exponent != p:
@@ -2139,12 +2186,12 @@ def parse_work_unit_mfaktc(filename):
 
 	try:
 		with open(filename, "rb") as f:
-			header = f.readline().rstrip(b"\n")
+			header = f.readline().rstrip(b"\r\n")
 
 			if args.check and f.read():
 				return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	mfaktc_tf = MFAKTC_TF_RE.match(header)
@@ -2154,10 +2201,11 @@ def parse_work_unit_mfaktc(filename):
 			mfaktc_tf.groups()
 		)
 	else:
+		logging.error("Failed to parse checkpoint file header: %s", header)
 		return None
 
 	if args.check:
-		chksum = checkpoint_checksum(header.rsplit(None, 1)[0])
+		chksum = binascii.crc32(header.rsplit(None, 1)[0]) & 0xFFFFFFFF
 		i = int(i, 16)
 		if chksum != i:
 			logging.error("Checksum error. Got %X, expected %X.", chksum, i)
@@ -2178,7 +2226,7 @@ def parse_work_unit_mfaktc(filename):
 	wu.stage = "TF{}".format(wu.bits)
 	wu.pct_complete = pct_complete_mfakt(wu.n, wu.bits, int(num_classes), int(cur_class), wagstaff)
 
-	wu.version = version.decode()
+	wu.version = version.decode("utf-8")
 	return wu
 
 
@@ -2188,12 +2236,12 @@ def parse_work_unit_mfakto(filename):
 
 	try:
 		with open(filename, "rb") as f:
-			header = f.readline().rstrip(b"\n")
+			header = f.readline().rstrip(b"\r\n")
 
 			if args.check and f.read():
 				return None
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	mfakto_tf = MFAKTO_TF_RE.match(header)
@@ -2201,10 +2249,11 @@ def parse_work_unit_mfakto(filename):
 	if mfakto_tf:
 		exp, bit_min, bit_max, num_classes, version, cur_class, num_factors, _factors_string, bit_level_time, i = mfakto_tf.groups()
 	else:
+		logging.error("Failed to parse checkpoint file header: %s", header)
 		return None
 
 	if args.check:
-		chksum = checkpoint_checksum(header.rsplit(None, 1)[0])
+		chksum = binascii.crc32(header.rsplit(None, 1)[0]) & 0xFFFFFFFF
 		i = int(i, 16)
 		if chksum != i:
 			logging.error("Checksum error. Got %X, expected %X.", chksum, i)
@@ -2220,7 +2269,7 @@ def parse_work_unit_mfakto(filename):
 	wu.stage = "TF{}".format(wu.bits)
 	wu.pct_complete = pct_complete_mfakt(wu.n, wu.bits, int(num_classes), int(cur_class))
 
-	wu.version = version.decode()
+	wu.version = version.decode("utf-8")
 	return wu
 
 
@@ -2236,7 +2285,7 @@ def parse_proof(filename):
 
 			header, _, version = f.readline().rstrip(b"\n").partition(b"=")
 			if header != b"VERSION":
-				logging.error("Error getting version number from proof header")
+				logging.error("Failed to get the version number from proof header")
 				return None
 			wu.version = int(version)
 			if wu.version not in {1, 2}:
@@ -2245,13 +2294,13 @@ def parse_proof(filename):
 
 			header, _, _hashlen = f.readline().rstrip(b"\n").partition(b"=")
 			if header != b"HASHSIZE":
-				logging.error("Error getting hash size from proof header")
+				logging.error("Failed to get the hash size from proof header")
 				return None
 
 			header, _, power = f.readline().rstrip(b"\n").partition(b"=")
 			power, _, power_mult = power.partition(b"x")
 			if header != b"POWER":
-				logging.error("Error getting power from proof header")
+				logging.error("Failed to get the power from proof header")
 				return None
 			wu.proof_power = int(power)
 			wu.proof_power_mult = int(power_mult) if power_mult else 1
@@ -2266,11 +2315,11 @@ def parse_proof(filename):
 
 			header, _, number = header.partition(b"=")
 			if header != b"NUMBER":
-				logging.error("Error getting number from proof header")
+				logging.error("Failed to get the number from proof header")
 				return None
 			proof_number = PROOF_NUMBER_RE.match(number)
 			if not proof_number:
-				logging.error("Error parsing number: %r", number)
+				logging.error("Failed to parse the number: %r", number)
 				return None
 			_, number, exponent, k, b, n, c, factors = proof_number.groups()
 			if exponent:
@@ -2313,7 +2362,7 @@ def parse_proof(filename):
 				wu.res64 = "{:016X}".format(residue & 0xFFFFFFFFFFFFFFFF)
 				wu.res2048 = "{:0512X}".format(residue & (1 << 2048) - 1)
 	except (IOError, OSError):
-		logging.exception("Error reading %r file.", filename)
+		logging.exception("Failed to read the %r file.", filename)
 		return None
 
 	wu.stage = "Proof"
@@ -2450,7 +2499,7 @@ def one_line_status(file, num, index, wu):
 	if args.long:
 		date = datetime.fromtimestamp(os.path.getmtime(file))
 		size = os.path.getsize(file)
-		result.extend(("{}B".format(output_unit(size)), "{:%c}".format(date)))
+		result.extend(("{}B".format(output_unit(size)), "{:%Y-%m-%d %H:%M:%S}".format(date)))  # "%F %T"
 	result += [
 		work_type_str,
 		"{}, {}".format(stage, wu.stage) if stage else "Stage: {}".format(wu.stage),
@@ -2616,7 +2665,7 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((j, num, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r save/checkpoint file", file)
 
 		if args.mlucas:
 			aaresults = aresults["Mlucas"] = []
@@ -2637,7 +2686,7 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((j, num, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r save/checkpoint file", file)
 
 		if args.cudalucas:
 			aaresults = aresults["CUDALucas"] = []
@@ -2653,7 +2702,7 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((j, num, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r save/checkpoint file", file)
 
 		if args.cudapm1:
 			aaresults = aresults["CUDAPm1"] = []
@@ -2669,20 +2718,21 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((j, num, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r save/checkpoint file", file)
 
 		if args.gpuowl:
 			aaresults = aresults["GpuOwl"] = []
 			entries = OrderedDict()
-			for entry in (
-				aglob
-				for globs in (
-					os.path.join(adir, "ll-[0-9]*", "[0-9]*.*"),
-					os.path.join(adir, "[0-9]*", "[0-9]*.*"),
-					os.path.join(adir, "[0-9]*", "unverified.*"),
-					os.path.join(adir, "[0-9]*.owl"),
+			for entry in chain.from_iterable(
+				map(
+					glob.iglob,
+					(
+						os.path.join(adir, "ll-[0-9]*", "[0-9]*.*"),
+						os.path.join(adir, "[0-9]*", "[0-9]*.*"),
+						os.path.join(adir, "[0-9]*", "unverified.*"),
+						os.path.join(adir, "[0-9]*.owl"),
+					),
 				)
-				for aglob in glob.iglob(globs)
 			):
 				match = GPUOWL_RE.search(entry)
 				if match:
@@ -2697,19 +2747,20 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((j, num, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r save/checkpoint file", file)
 
 		if args.prpll:
 			aaresults = aresults["PRPLL"] = []
 			entries = OrderedDict()
-			for entry in (
-				aglob
-				for globs in (
-					os.path.join(adir, "ll-[0-9]*", "[0-9]*-[0-9]*.ll"),
-					os.path.join(adir, "[0-9]*", "[0-9]*-[0-9]*.prp"),
-					os.path.join(adir, "[0-9]*", "unverified.prp"),
+			for entry in chain.from_iterable(
+				map(
+					glob.iglob,
+					(
+						os.path.join(adir, "ll-[0-9]*", "[0-9]*-[0-9]*.ll"),
+						os.path.join(adir, "[0-9]*", "[0-9]*-[0-9]*.prp"),
+						os.path.join(adir, "[0-9]*", "unverified.prp"),
+					),
 				)
-				for aglob in glob.iglob(globs)
 			):
 				match = PRPLL_RE.search(entry)
 				if match:
@@ -2721,7 +2772,7 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((j, num, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r save/checkpoint file", file)
 
 		if args.prmers:
 			aaresults = aresults["PrMers"] = []
@@ -2729,15 +2780,15 @@ def main(dirs):
 			for entry in glob.iglob(os.path.join(adir, "*m_[0-9]*.ckpt*")):
 				match = PRMERS_RE.match(os.path.basename(entry))
 				if match:
-					exponent = int(match.group(1) or match.group(2))
-					entries.setdefault(exponent, []).append((entry, match.group(3) and int(match.group(3))))
+					exponent = int(match.group(1) or match.group(2) or match.group(3))
+					entries.setdefault(exponent, []).append((entry, match.group(4) and int(match.group(4))))
 			for exponent, entry in entries.items():
 				for j, (file, curve) in enumerate(sorted(entry)):
 					result = parse_work_unit_prmers(file, exponent, curve)
 					if result is not None:
 						aaresults.append((j, -1, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r save/checkpoint file", file)
 
 		if args.mfaktc:
 			aaresults = aresults["mfaktc"] = []
@@ -2747,7 +2798,7 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((0, -1, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r checkpoint file", file)
 
 		if args.mfakto:
 			aaresults = aresults["mfakto"] = []
@@ -2763,21 +2814,19 @@ def main(dirs):
 					if result is not None:
 						aaresults.append((j, num, file, result))
 					else:
-						logging.error("unable to parse the %r save/checkpoint file", file)
+						logging.error("Unable to parse the %r checkpoint file", file)
 
 		if args.proof:
 			aaresults = aresults["PRP proof"] = []
-			for file in (
-				aglob
-				for globs in (os.path.join(adir, "*.proof*"), os.path.join(adir, "proof", "*.proof*"))
-				for aglob in glob.iglob(globs)
+			for file in chain.from_iterable(
+				map(glob.iglob, (os.path.join(adir, "*.proof*"), os.path.join(adir, "proof", "*.proof*")))
 			):
 				if file.endswith((".proof", ".proof.tmp")):
 					result = parse_proof(file)
 					if result is not None:
 						aaresults.append((0, -1, file, result))
 					else:
-						logging.error("unable to parse the %r proof file", file)
+						logging.error("Unable to parse the %r proof file", file)
 
 	if executor:
 		executor.shutdown()
