@@ -3209,21 +3209,31 @@ def config_write(config):
 
 
 def get_guid(config):
-	"""Retrieve the ComputerGUID from the configuration if it exists."""
+	"""Retrieve the ComputerGUID from the configuration if it exists.
+
+	It is created by register_instance() / generate_computer_guid() and replaced with
+	PrimeNet's g= value after successful registration—not recomputed on each launch.
+	"""
 	if config.has_option(SEC.PrimeNet, "ComputerGUID"):
 		return config.get(SEC.PrimeNet, "ComputerGUID")
 	return None
 
 
+def _primeini_guid_stored_value(config, option):
+	"""Return stripped HardwareGUID/WindowsGUID text if the key exists and is non-empty, else ''."""
+	if not config.has_option(SEC.PrimeNet, option):
+		return ""
+	return config.get(SEC.PrimeNet, option).strip()
+
+
 def calc_hardware_guid():
 	hardware_guid = md5((args.cpu_brand + str(uuid.getnode())).encode("utf-8")).hexdigest()  # similar as MPrime
-	if config.has_option(SEC.PrimeNet, "HardwareGUID"):
-		guid = config.get(SEC.PrimeNet, "HardwareGUID")
-		if guid != hardware_guid:
-			logging.warning("The hardware GUID changed from %r to %r, using GUID in %r", guid, hardware_guid, args.localfile)
-		hardware_guid = guid
-	else:
-		config.set(SEC.PrimeNet, "HardwareGUID", hardware_guid)
+	stored = _primeini_guid_stored_value(config, "HardwareGUID")
+	if stored:
+		if stored != hardware_guid:
+			logging.warning("The hardware GUID changed from %r to %r, using GUID in %r", stored, hardware_guid, args.localfile)
+		return stored
+	config.set(SEC.PrimeNet, "HardwareGUID", hardware_guid)
 	return hardware_guid
 
 
@@ -3231,12 +3241,12 @@ def calc_windows_guid():
 	windows_guid = (
 		md5((get_windows_serial_number() + get_windows_sid()).encode("utf-8")).hexdigest() if sys.platform == "win32" else None
 	)
-	if config.has_option(SEC.PrimeNet, "WindowsGUID"):
-		guid = config.get(SEC.PrimeNet, "WindowsGUID")
-		if guid != windows_guid:
-			logging.warning("The Windows GUID changed from %r to %r, using GUID in %r", guid, windows_guid, args.localfile)
-		windows_guid = guid
-	elif windows_guid:
+	stored = _primeini_guid_stored_value(config, "WindowsGUID")
+	if stored:
+		if windows_guid is not None and stored != windows_guid:
+			logging.warning("The Windows GUID changed from %r to %r, using GUID in %r", stored, windows_guid, args.localfile)
+		return stored
+	if windows_guid:
 		config.set(SEC.PrimeNet, "WindowsGUID", windows_guid)
 	return windows_guid
 
@@ -3331,7 +3341,11 @@ def merge_options_and_config(config, args):
 def encrypt(config, args):
 	if args.encrypt is not None and not args.encrypt:
 		return
-	guid = config.get(SEC.PrimeNet, "HardwareGUID") if config.has_option(SEC.PrimeNet, "HardwareGUID") else calc_hardware_guid()
+	guid = (
+		config.get(SEC.PrimeNet, "HardwareGUID").strip()
+		if _primeini_guid_stored_value(config, "HardwareGUID")
+		else calc_hardware_guid()
+	)
 	for section, value in OPTIONS_ENCRYPT.items():
 		for attr, option in value.items():
 			attr_val = getattr(args, attr)
@@ -3373,7 +3387,11 @@ def encrypt(config, args):
 
 
 def decrypt(config, args):
-	guid = config.get(SEC.PrimeNet, "HardwareGUID") if config.has_option(SEC.PrimeNet, "HardwareGUID") else calc_hardware_guid()
+	guid = (
+		config.get(SEC.PrimeNet, "HardwareGUID").strip()
+		if _primeini_guid_stored_value(config, "HardwareGUID")
+		else calc_hardware_guid()
+	)
 	for section, value in OPTIONS_ENCRYPT.items():
 		for attr, option in value.items():
 			attr_val = getattr(args, attr)
@@ -7046,7 +7064,13 @@ def register_instance(guid=None):
 	config.set(SEC.PrimeNet, "username", args.user_id)
 	args.computer_id = result["cn"]
 	config.set(SEC.PrimeNet, "ComputerID", args.computer_id)
-	config.set(SEC.PrimeNet, "user_name", result["un"])
+	u_val = (result.get("u") or args.user_id or "").strip()
+	un_val = (result.get("un") or "").strip()
+	if not un_val or (un_val.upper() == "ANONYMOUS" and u_val and u_val.upper() != "ANONYMOUS"):
+		user_display = u_val if u_val else "ANONYMOUS"
+	else:
+		user_display = un_val
+	config.set(SEC.PrimeNet, "user_name", user_display)
 	options_counter = int(result["od"])
 	guid = result["g"]
 	config.set(SEC.PrimeNet, "ComputerGUID", guid)
@@ -7149,6 +7173,29 @@ def unreserve(dirs, p):
 				break
 	else:
 		logging.error("Failed to unreserve the exponent: %s not found in workfile%s", p, "s" if len(dirs) != 1 else "")
+
+
+def list_work_todo_exponents_json(dirs, dest_path):
+	"""Collect parsed Assignment lines from each worker work file; write JSON to *dest_path* or stdout if *dest_path* is '-'."""
+	adapter = logging.LoggerAdapter(logger, None)
+	rows = []
+	for i, adir in enumerate(dirs):
+		workfile = os.path.join(adir, "worktodo-{}.txt".format(i) if args.prpll else args.work_file)
+		if not os.path.isfile(workfile):
+			continue
+		with LockFile(workfile):
+			tasks = list(read_workfile(adapter, workfile))
+		for task in tasks:
+			if isinstance(task, Assignment):
+				rows.append(
+					{"worker": i, "exponent": int(task.n), "assignment": output_assignment(task)}
+				)
+	text = json.dumps(rows, ensure_ascii=False, indent=2) + "\n"
+	if dest_path == "-":
+		sys.stdout.write(text)
+	else:
+		with io.open(dest_path, "w", encoding="utf-8") as f:
+			f.write(text)
 
 
 def get_proof_data(adapter, assignment_aid, file):
@@ -8508,7 +8555,7 @@ def update_assignment(adapter, cpu_num, assignment, task):
 			adapter.info("Converting from Pfactor= to Pminus1=")
 			assignment.work_type = PRIMENET_WORK_TYPE.PMINUS1
 			add_bounds = True
-		elif args.gpuowl and (
+		elif (args.gpuowl or args.prpll) and (
 			(assignment.work_type == PRIMENET_WORK_TYPE.PRP and assignment.tests_saved)
 			or assignment.work_type == PRIMENET_WORK_TYPE.PFACTOR
 		):
@@ -8640,6 +8687,262 @@ def register_assignments(adapter, adir, cpu_num, tasks):
 	return registered_assignment
 
 
+def build_register_exponent_assignment(
+	work_type,
+	p,
+	sieve_depth=None,
+	factor_to=None,
+	pminus1ed=None,
+	tests_saved=None,
+	b1=0,
+	b2=0,
+	prp_base=None,
+	prp_residue_type=None,
+	curves_to_do=None,
+	factors=None,
+	b2_start=None,
+	k=1.0,
+	b=2,
+	c=-1,
+):
+	"""Build Assignment from parameters collected by ``register_exponents`` (interactive or JSON). Same logic as the former inline block in that function."""
+	if factors is None:
+		factors = []
+	assignment = Assignment()
+	assignment.k = float(k)
+	assignment.b = int(b)
+	assignment.n = int(p)
+	assignment.c = int(c)
+
+	if work_type in {PRIMENET_WORK_TYPE.FIRST_LL, PRIMENET_WORK_TYPE.DBLCHK}:
+		assignment.work_type = work_type
+		assignment.sieve_depth = float(sieve_depth)
+		assignment.pminus1ed = int(pminus1ed)
+	elif work_type in {PRIMENET_WORK_TYPE.PRP, 151}:
+		assignment.prp_dblchk = work_type == 151
+		assignment.work_type = PRIMENET_WORK_TYPE.PRP
+		assignment.B1 = int(b1)
+		assignment.B2 = int(b2)
+		assignment.sieve_depth = float(sieve_depth)
+		assignment.tests_saved = float(tests_saved)
+		if work_type == 151:
+			assignment.prp_base = int(prp_base)
+			assignment.prp_residue_type = int(prp_residue_type)
+		assignment.known_factors = factors
+	elif work_type == PRIMENET_WORK_TYPE.FACTOR:
+		assignment.work_type = work_type
+		assignment.sieve_depth = float(sieve_depth)
+		assignment.factor_to = float(factor_to)
+	elif work_type == PRIMENET_WORK_TYPE.PFACTOR:
+		assignment.work_type = work_type
+		assignment.B1 = int(b1)
+		assignment.B2 = int(b2)
+		assignment.sieve_depth = float(sieve_depth)
+		assignment.tests_saved = float(tests_saved)
+		assignment.known_factors = factors
+	elif work_type == PRIMENET_WORK_TYPE.PMINUS1:
+		assignment.work_type = work_type
+		assignment.B1 = int(b1)
+		assignment.B2 = int(b2)
+		assignment.sieve_depth = float(sieve_depth)
+		assignment.known_factors = factors
+		if b2_start is not None:
+			assignment.B2_start = int(b2_start)
+	elif work_type == PRIMENET_WORK_TYPE.ECM:
+		assignment.work_type = work_type
+		assignment.B1 = int(b1)
+		assignment.B2 = int(b2)
+		assignment.curves_to_do = int(curves_to_do)
+		assignment.known_factors = factors
+	else:
+		raise ValueError("Unsupported work_type {!r}".format(work_type))
+
+	return assignment
+
+
+def read_register_exponents_json_from_stdin():
+	"""Read UTF-8 JSON from standard input; return parsed object or exit on failure."""
+	try:
+		if sys.version_info[0] >= 3:
+			raw = sys.stdin.buffer.read()
+			text = raw.decode("utf-8")
+		else:
+			raw = sys.stdin.read()
+			if isinstance(raw, unicode):
+				text = raw
+			else:
+				text = raw.decode("utf-8")
+	except (UnicodeDecodeError, AttributeError) as e:
+		logging.critical("Could not decode standard input as UTF-8: %s", e)
+		sys.exit(1)
+	try:
+		return json.loads(text)
+	except ValueError as e:
+		logging.critical("Could not parse JSON from standard input: %s", e)
+		sys.exit(1)
+
+
+def suggest_register_exponent_fields(adapter, n, work_type, tests_saved_hint):
+	"""Build suggested field values from mersenne.ca and walk() (same idea as interactive ``register_exponents``). Returns a JSON-serializable dict."""
+	out = {"ok": False, "n": n, "work_type": work_type}
+	if n < 2 or n > 10000000000:
+		out["error"] = "n must be between 2 and 10,000,000,000"
+		return out
+	if not is_prime(n):
+		out["error"] = "n must be a prime exponent"
+		return out
+
+	result = get_exponent(adapter, n)
+	sieve_depth = None
+	b1_ecm = 0
+	b2_ecm = 0
+	known_factors = []
+	warning = None
+	if result is not None and int(result["exponent"]) == n:
+		actual = result["current"]["actual"]
+		sieve_depth = int(actual["tf"])
+		if "ecm_effort" in result:
+			try:
+				b1_ecm = next(r["b1"] for r in result["ecm_effort"] if r["fac_miss_chance"] >= 0.01)
+				b2_ecm = b1_ecm * 100
+			except StopIteration:
+				b1_ecm = 0
+				b2_ecm = 0
+		if "factors_prime" in result:
+			known_factors = [int(factor["factor"]) for factor in result["factors_prime"]]
+	elif result is None:
+		warning = "Could not fetch exponent data from mersenne.ca; TF/P-1 suggestions may be missing."
+	else:
+		warning = "mersenne.ca response did not match this exponent; suggestions may be incomplete."
+
+	out["ok"] = True
+	if warning:
+		out["warning"] = warning
+
+	sf = float(sieve_depth) if sieve_depth is not None else 99.0
+	if sieve_depth is not None:
+		out["sieve_depth"] = sieve_depth
+	else:
+		out["sieve_depth"] = None
+
+	if work_type == PRIMENET_WORK_TYPE.FACTOR:
+		fl = factor_limit(n)
+		sd = int(sieve_depth) if sieve_depth is not None else 0
+		out["factor_to"] = max(fl, sd + 1)
+
+	use_walk = (
+		(args.gpuowl or args.prpll)
+		and (
+			(work_type in {PRIMENET_WORK_TYPE.PRP, 151} and tests_saved_hint)
+			or work_type == PRIMENET_WORK_TYPE.PFACTOR
+		)
+	) or work_type == PRIMENET_WORK_TYPE.PMINUS1
+	if use_walk:
+		try:
+			(small_b1, small_b2), (mid_b1, mid_b2), (max_b1, max_b2) = walk(n, sf)
+			out["p1_b1_min"] = int(small_b1)
+			out["p1_b2_min"] = int(small_b2)
+			out["p1_b1_mid"] = int(mid_b1)
+			out["p1_b2_mid"] = int(mid_b2)
+			out["p1_b1_max"] = int(max_b1)
+			out["p1_b2_max"] = int(max_b2)
+			if args.gpuowl or args.prpll:
+				out["B1"] = 0
+				out["B2"] = 0
+			else:
+				out["B1"] = int(mid_b1)
+				out["B2"] = int(mid_b2)
+		except (TypeError, ValueError, ArithmeticError) as e:
+			out["walk_error"] = str(e)
+
+	if work_type == PRIMENET_WORK_TYPE.ECM:
+		b1e = b1_ecm or 250000
+		b2e = b2_ecm if b2_ecm else b1e * 100
+		out["B1"] = int(b1e)
+		out["B2"] = int(b2e)
+
+	if known_factors:
+		out["known_factors"] = known_factors
+
+	return out
+
+
+def register_exponents_from_json_spec(dirs, spec):
+	"""Append one assignment from a JSON object dict to the work file and call register_assignments (same end state as --register-exponents)."""
+	if not isinstance(spec, dict):
+		logging.critical("JSON root must be an object")
+		sys.exit(1)
+	try:
+		work_type = int(spec["work_type"])
+		p = int(spec["n"])
+	except (KeyError, TypeError, ValueError) as e:
+		logging.critical("JSON must include integer work_type and n: %s", e)
+		sys.exit(1)
+	if p < 2 or p > 10000000000:
+		logging.critical("n must be between 2 and 10,000,000,000")
+		sys.exit(1)
+	if not is_prime(p):
+		logging.critical("n must be a prime exponent")
+		sys.exit(1)
+	raw_kf = spec.get("known_factors")
+	if raw_kf is None:
+		factors = []
+	elif isinstance(raw_kf, list):
+		factors = [int(x) for x in raw_kf]
+	else:
+		logging.critical("known_factors must be a list of integers or omitted")
+		sys.exit(1)
+	try:
+		assignment = build_register_exponent_assignment(
+			work_type,
+			p,
+			sieve_depth=spec.get("sieve_depth"),
+			factor_to=spec.get("factor_to"),
+			pminus1ed=spec.get("pminus1ed", 1),
+			tests_saved=spec.get("tests_saved"),
+			b1=int(spec.get("B1", 0)),
+			b2=int(spec.get("B2", 0)),
+			prp_base=spec.get("prp_base"),
+			prp_residue_type=spec.get("prp_residue_type"),
+			curves_to_do=spec.get("curves_to_do"),
+			factors=factors,
+			b2_start=spec.get("B2_start"),
+			k=float(spec.get("k", 1.0)),
+			b=int(spec.get("b", 2)),
+			c=int(spec.get("c", -1)),
+		)
+		if work_type == PRIMENET_WORK_TYPE.FACTOR:
+			if assignment.sieve_depth > assignment.factor_to:
+				raise ValueError("sieve_depth must be <= factor_to")
+			if assignment.factor_to < factor_limit(p):
+				raise ValueError("factor_to must be at least {:n} for this exponent".format(factor_limit(p)))
+	except (TypeError, ValueError) as e:
+		logging.critical("%s", e)
+		sys.exit(1)
+	try:
+		cpu_num = int(spec.get("cpu_num", 0))
+	except (TypeError, ValueError):
+		logging.critical("cpu_num must be an integer")
+		sys.exit(1)
+	if cpu_num < 0 or cpu_num >= args.num_workers:
+		logging.critical(
+			"cpu_num must be between 0 and %s (num_workers is %s)", args.num_workers - 1, args.num_workers
+		)
+		sys.exit(1)
+
+	adapter = logging.LoggerAdapter(logger, {"cpu_num": cpu_num} if args.num_workers > 1 else None)
+	adir = dirs[cpu_num]
+	workfile = os.path.join(adir, "worktodo-{}.txt".format(cpu_num) if args.prpll else args.work_file)
+	task = output_assignment(assignment)
+	logging.info("Adding assignment %r to %r", task, workfile)
+	with LockFile(workfile), io.open(workfile, "a", encoding="utf-8") as file:
+		file.write(task + "\n")
+	with LockFile(workfile):
+		tasks = list(read_workfile(adapter, workfile))
+		register_assignments(adapter, adir, cpu_num, tasks)
+	logging.info("Register exponent finished for M{}.".format(assignment.n))
+
+
 def register_exponents(dirs):
 	"""Registers specific exponents by generating assignment lines and adding them to the work file."""
 	wrapper = textwrap.TextWrapper(width=75)
@@ -8734,12 +9037,13 @@ https://www.mersenne.ca/M{}
 			elif work_type not in {PRIMENET_WORK_TYPE.FACTOR, PRIMENET_WORK_TYPE.PMINUS1, PRIMENET_WORK_TYPE.ECM}:
 				tests_saved = ask_float("Primality tests saved if factor is found", 0.0 if pminus1ed else 1.3, 0)
 
+			prp_base = prp_residue_type = None
 			if work_type == 151:
 				prp_base = ask_int("PRP base", 3, 2)
 				prp_residue_type = ask_int("PRP residue type", 1, 1, 5)
 
 			if (
-				args.gpuowl
+				(args.gpuowl or args.prpll)
 				and ((work_type in {PRIMENET_WORK_TYPE.PRP, 151} and tests_saved) or work_type == PRIMENET_WORK_TYPE.PFACTOR)
 			) or work_type == PRIMENET_WORK_TYPE.PMINUS1:
 				print("\nOptimal P-1 bounds:")
@@ -8749,8 +9053,9 @@ https://www.mersenne.ca/M{}
 					print("\t{}: B1={:n}, B2={:n}, Probability {:%} ({:.3%} + {:.3%})".format(label, b1, b2, p1 + p2, p1, p2))
 				print("For more information, see: {}prob.php?exponent={}\n".format(mersenne_ca_baseurl, p))
 
-				b1 = ask_int("P-1 Bound #1", 0 if args.gpuowl else midB1, 100)
-				b2 = ask_int("P-1 Bound #2", 0 if args.gpuowl else midB2, 0)
+				_gpu_style_p1 = args.gpuowl or args.prpll
+				b1 = ask_int("P-1 Bound #1", 0 if _gpu_style_p1 else midB1, 100)
+				b2 = ask_int("P-1 Bound #2", 0 if _gpu_style_p1 else midB2, 0)
 			elif work_type == PRIMENET_WORK_TYPE.ECM:
 				b1 = ask_int("ECM Bound #1", b1 or 250000, 100)
 				b2 = ask_int("ECM Bound #2", b2, 0)
@@ -8790,49 +9095,20 @@ https://www.mersenne.ca/M{}
 			if not ask_ok_cancel():
 				break
 
-			assignment = Assignment()
-			assignment.k = 1.0
-			assignment.b = 2
-			assignment.n = p
-			assignment.c = -1
-			if work_type in {PRIMENET_WORK_TYPE.FIRST_LL, PRIMENET_WORK_TYPE.DBLCHK}:
-				assignment.work_type = work_type
-				assignment.sieve_depth = sieve_depth
-				assignment.pminus1ed = int(pminus1ed)
-			elif work_type in {PRIMENET_WORK_TYPE.PRP, 151}:
-				assignment.prp_dblchk = work_type == 151
-				assignment.work_type = PRIMENET_WORK_TYPE.PRP
-				assignment.B1 = b1
-				assignment.B2 = b2
-				assignment.sieve_depth = sieve_depth
-				assignment.tests_saved = tests_saved
-				if work_type == 151:
-					assignment.prp_base = prp_base
-					assignment.prp_residue_type = prp_residue_type
-				assignment.known_factors = factors
-			elif work_type == PRIMENET_WORK_TYPE.FACTOR:
-				assignment.work_type = work_type
-				assignment.sieve_depth = sieve_depth
-				assignment.factor_to = factor_to
-			elif work_type == PRIMENET_WORK_TYPE.PFACTOR:
-				assignment.work_type = work_type
-				assignment.B1 = b1
-				assignment.B2 = b2
-				assignment.sieve_depth = sieve_depth
-				assignment.tests_saved = tests_saved
-				assignment.known_factors = factors
-			elif work_type == PRIMENET_WORK_TYPE.PMINUS1:
-				assignment.work_type = work_type
-				assignment.B1 = b1
-				assignment.B2 = b2
-				assignment.sieve_depth = sieve_depth
-				assignment.known_factors = factors
-			elif work_type == PRIMENET_WORK_TYPE.ECM:
-				assignment.work_type = work_type
-				assignment.B1 = b1
-				assignment.B2 = b2
-				assignment.curves_to_do = curves_to_do
-				assignment.known_factors = factors
+			assignment = build_register_exponent_assignment(
+				work_type,
+				p,
+				sieve_depth=sieve_depth,
+				factor_to=factor_to,
+				pminus1ed=pminus1ed,
+				tests_saved=tests_saved,
+				b1=b1,
+				b2=b2,
+				prp_base=prp_base,
+				prp_residue_type=prp_residue_type,
+				curves_to_do=curves_to_do,
+				factors=factors,
+			)
 
 			task = output_assignment(assignment)
 			print("\nAdding assignment {!r} to the {!r} file\n".format(task, workfile))
@@ -10210,10 +10486,32 @@ parser.add_argument(
 	help="Prompt for all parameters needed to register one or more specific exponents and exit.",
 )
 parser.add_argument(
+	"--register-exponents-json",
+	action="store_true",
+	help="Register one exponent from a UTF-8 JSON object read from standard input (non-interactive). "
+	"Requires the same -w/-m (etc.) options as a normal run. Keys: work_type, n, optional cpu_num (default 0), "
+	"plus fields per work_type (same as build_register_exponent_assignment / interactive register-exponents).",
+)
+parser.add_argument(
+	"--suggest-register-fields",
+	action="store_true",
+	help="Read UTF-8 JSON from stdin with keys n, work_type, optional tests_saved (default 1.3); "
+	"print one JSON object of suggested register-exponent fields (mersenne.ca + walk) to stdout and exit.",
+)
+parser.add_argument(
 	"--unreserve",
 	dest="exponent",
 	type=int,
 	help="Unreserve the exponent and exit. Use this only if you are sure you will not be finishing this exponent.",
+)
+parser.add_argument(
+	"--list-work-todo-exponents",
+	nargs="?",
+	const="-",
+	default=None,
+	metavar="FILE",
+	help="Write a JSON array of assignments in local work todo file(s) to FILE (UTF-8), or stdout if FILE is '-'. "
+	"Each object has worker (int), exponent (int), and assignment (work todo line). Then exit.",
 )
 parser.add_argument("--unreserve-all", action="store_true", help="Report assignment results, unreserve all assignments and exit.")
 parser.add_argument("--no-more-work", action="store_true", help="Prevent this program from getting new assignments and exit.")
@@ -10224,7 +10522,22 @@ parser.add_argument(
 )
 parser.add_argument("--ping", action="store_true", help="Ping the PrimeNet server, show version information and exit.")
 parser.add_argument(
+	"--sync-ini",
+	action="store_true",
+	help="Merge detected hardware and command-line options into prime.ini and exit (no PrimeNet traffic).",
+)
+parser.add_argument(
+	"--register-only",
+	action="store_true",
+	help="Register or update this computer with PrimeNet (ComputerGUID / uc) and exit; does not run the assignment loop.",
+)
+parser.add_argument(
 	"--v6", action="store_true", help="Use the experimental PrimeNet v6 API. Currently only works with the --ping option."
+)
+parser.add_argument(
+	"--list-gpus",
+	action="store_true",
+	help="Print detected GPUs as a JSON array (name, cores, frequency_mhz, memory_mib, source) and exit.",
 )
 parser.add_argument("--debug-info", action="store_true", help="Output debugging information to include in bug reports and exit.")
 parser.add_argument(
@@ -10410,6 +10723,23 @@ console_handler.setFormatter(
 logger.addHandler(console_handler)
 # logging.basicConfig(level=max(logging.INFO - args.debug * 10, 0), format="%(filename)s: " + ("%(funcName)s:\t" if args.debug > 1 else "") + "[%(threadName)s %(asctime)s]  %(levelname)s: %(message)s")
 
+if args.list_gpus:
+	gpu_rows = get_gpus()
+	payload = []
+	for name, cores, frequency, memory, source in gpu_rows:
+		payload.append(
+			{
+				"name": name,
+				"cores": cores,
+				"frequency_mhz": frequency,
+				"memory_mib": memory,
+				"source": source,
+			}
+		)
+	_json_kw = {"ensure_ascii": False} if sys.version_info[0] >= 3 else {}
+	print(json.dumps(payload, **_json_kw))
+	sys.exit(0)
+
 # If debug is requested
 
 # https://stackoverflow.com/questions/10588644/how-can-i-see-the-entire-http-request-thats-being-sent-by-my-python-application
@@ -10468,7 +10798,11 @@ except (IOError, OSError) as e:
 # load prime.ini and update args
 config = config_read()
 merge_config_and_options(config, args)
+had_hardware_guid = bool(_primeini_guid_stored_value(config, "HardwareGUID"))
+had_windows_guid = bool(_primeini_guid_stored_value(config, "WindowsGUID"))
 decrypt(config, args)
+if sys.platform == "win32":
+	calc_windows_guid()
 
 if COLOR:
 	if "NO_COLOR" in os.environ:
@@ -10530,6 +10864,13 @@ if args.setup:
 	config_write(config)
 else:
 	encrypt(config, args)
+
+guids_config_needs_write = (not had_hardware_guid and bool(_primeini_guid_stored_value(config, "HardwareGUID"))) or (
+	not had_windows_guid and bool(_primeini_guid_stored_value(config, "WindowsGUID"))
+)
+if guids_config_needs_write:
+	logging.debug("Writing %r (hardware/windows GUID keys)", args.localfile)
+	config_write(config)
 
 if not args.work_preference:
 	args.work_preference = [
@@ -10651,10 +10992,15 @@ if not config.has_option(SEC.PrimeNet, "MaxExponents"):
 	max_exps = (10000 if args.min_exp and args.min_exp >= MAX_PRIMENET_EXP else 1000) if args.mfaktc or args.mfakto else 15
 	config.set(SEC.PrimeNet, "MaxExponents", str(max_exps))
 
-# write back prime.ini if necessary
+# write back prime.ini if necessary (GUID keys may already be written earlier)
 if config_updated:
 	logging.debug("Writing %r", args.localfile)
 	config_write(config)
+
+if args.sync_ini:
+	config_write(config)
+	logging.info("Wrote %r (--sync-ini).", os.path.join(workdir, args.localfile))
+	sys.exit(0)
 
 # if guid already exist, recover it, this way, one can (re)register to change
 # the CPU model (changing instance name can only be done in the website)
@@ -10696,6 +11042,10 @@ if args.status:
 	output_status(dirs)
 	sys.exit(0)
 
+if args.list_work_todo_exponents is not None:
+	list_work_todo_exponents_json(dirs, args.list_work_todo_exponents)
+	sys.exit(0)
+
 if args.results or args.proofs:
 	for i, adir in enumerate(dirs):
 		adapter = logging.LoggerAdapter(logger, {"cpu_num": i} if args.num_workers > 1 else None)
@@ -10718,6 +11068,37 @@ if args.results or args.proofs:
 
 if args.recover or args.recover_all:
 	recover_assignments(dirs, recover_all=args.recover_all)
+	sys.exit(0)
+
+if args.suggest_register_fields:
+	req = read_register_exponents_json_from_stdin()
+	if not isinstance(req, dict):
+		sys.stdout.write(json.dumps({"ok": False, "error": "stdin root must be a JSON object"}) + "\n")
+		sys.exit(0)
+	try:
+		_n = int(req["n"])
+		_wt = int(req["work_type"])
+	except (KeyError, TypeError, ValueError):
+		sys.stdout.write(json.dumps({"ok": False, "error": "stdin JSON must include integer n and work_type"}) + "\n")
+		sys.exit(0)
+	_tsh = req.get("tests_saved")
+	if _tsh is None:
+		_tsh = 1.3
+	else:
+		try:
+			_tsh = float(_tsh)
+		except (TypeError, ValueError):
+			_tsh = 1.3
+	_suggest_adapter = logging.LoggerAdapter(logger, None)
+	_suggest_out = suggest_register_exponent_fields(_suggest_adapter, _n, _wt, _tsh)
+	_json_kw = {"ensure_ascii": False} if sys.version_info[0] >= 3 else {}
+	sys.stdout.write(json.dumps(_suggest_out, **_json_kw) + "\n")
+	sys.stdout.flush()
+	sys.exit(0)
+
+if args.register_exponents_json:
+	spec = read_register_exponents_json_from_stdin()
+	register_exponents_from_json_spec(dirs, spec)
 	sys.exit(0)
 
 if args.register_exponents:
@@ -10758,6 +11139,10 @@ if args.test_email:
 		parser.error("The SMTP server and From e-mail address are required to send e-mails")
 	if not test_msg(guid):
 		sys.exit(1)
+	sys.exit(0)
+
+if args.register_only:
+	register_instance(get_guid(config))
 	sys.exit(0)
 
 # use the v5 API for registration and program options

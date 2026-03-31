@@ -465,6 +465,15 @@ For a more modern look on **Python 3**, install [ttkbootstrap](https://github.co
 
 The GUI covers common options (work directory, user ID, GIMPS program, workers, timeout, check-in interval, days of work, extra CLI tokens). For every flag, the **command line remains the full interface**.
 
+### First-time PrimeNet registration (without `--setup`)
+
+You can configure `prime.ini` (or the GUI) instead of running `--setup`. PrimeNet still needs your computer registered once.
+
+* **Signal “not registered yet”:** `[PrimeNet]` usually has **no `ComputerGUID`** key. The program uses that value as the instance id after the server accepts registration.
+* **What performs registration:** A **full** AutoPrimeNet run — the same as clicking **Run** in the GUI — loads config, then if `ComputerGUID` is missing it calls **`register_instance`** (PrimeNet “uc”) and writes the returned GUID. This is **not** done by **`--sync-ini`**: the GUI’s background sync only merges hardware/options into `prime.ini` and exits before registration.
+* **Register then stop:** Set **timeout to `0`** (Work Settings in the GUI, or `-t 0` on the CLI). When `ComputerGUID` was missing, the first such run registers and then exits instead of staying in the long-running loop.
+* **Note:** If a registration attempt fails partway, a local `ComputerGUID` might already exist in `prime.ini`; that does not always mean the server registration succeeded. The program can retry registration in some error paths when talking to PrimeNet.
+
 ## Contributing
 
 Pull requests welcome! Ideas for contributions:
