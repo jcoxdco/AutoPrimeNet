@@ -82,6 +82,20 @@ ignore = [
 	"RUF023"
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"tests/test_autoprimenet_gui.py" = [
+	"SLF001",
+	"PLR6301",
+	"PLC0415",
+	"ARG001",
+	"ARG002",
+	"ARG005",
+	"SIM105",
+	"SIM117",
+	"RET504",
+	"RUF059",
+]
+
 [tool.ruff.lint.isort]
 split-on-trailing-comma = false
 

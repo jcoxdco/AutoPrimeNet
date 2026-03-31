@@ -150,6 +150,20 @@ jobs:
         python -X dev autoprimenet.py --debug-info
         python -X dev gimps_status.py --help
 
+  GUI-tests:
+    name: Linux GUI tests
+
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+    - name: Install tkinter
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-tk
+    - name: Run autoprimenet_gui tests
+      run: |
+        python3 -m unittest discover -s tests -p "test_*.py" -v
+
   Python:
     name: Linux Python
 
