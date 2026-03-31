@@ -457,21 +457,68 @@ Notification Options:
 
 [`autoprimenet_gui.py`](autoprimenet_gui.py) is a small **optional** front end built with [tkinter](https://docs.python.org/3/library/tkinter.html). It does not import the main program (which is structured as a script); it **starts `autoprimenet.py`** (or a frozen `autoprimenet.exe`) with the arguments you choose and shows **stdout/stderr** in a scrollable window.
 
-**Run:** `python3 autoprimenet_gui.py` (or `python autoprimenet_gui.py`) from a directory where `autoprimenet.py` is present, or place **`autoprimenet_gui.exe` next to `autoprimenet.exe`** if you use the Windows PyInstaller builds from [`scripts/build_windows_exe.ps1`](scripts/build_windows_exe.ps1).
+### Prerequisites (all platforms)
 
-**Requirements:** Tcl/Tk and tkinter are part of many Python installs. On Debian/Ubuntu you may need `sudo apt install python3-tk`. Python 2 can use `Tkinter` if available.
+* **Python** 2 or 3, with the same [Requests](https://requests.readthedocs.io/en/latest/) dependency as the main program (see the introduction above).
+* **`autoprimenet.py` must be in the same directory as `autoprimenet_gui.py`** when you run from source (or use frozen Windows executables placed next to each other). The GUI resolves the sibling script or `autoprimenet.exe` from its own location.
+* **tkinter** and the Tcl/Tk runtime (see per-OS notes below). Python 2 uses `Tkinter` when available.
 
-For a more modern look on **Python 3**, install [ttkbootstrap](https://github.com/israel-dryer/ttkbootstrap): `pip install -r requirements-gui.txt`. If it is not installed, the GUI falls back to standard `tkinter.ttk`.
+### Windows
 
-The GUI covers common options (work directory, user ID, GIMPS program, workers, timeout, check-in interval, days of work, extra CLI tokens). For every flag, the **command line remains the full interface**.
+* **tkinter:** Included with the official installers from [python.org](https://www.python.org/downloads/). If you use a minimal or embedded distribution, ensure Tcl/Tk is included so `import tkinter` works.
+* **Run:** In Command Prompt or PowerShell, `cd` to the folder that contains both scripts, then:
+
+	```bat
+	python autoprimenet_gui.py
+	```
+
+	Or: `py autoprimenet_gui.py` if you use the Python launcher.
+
+* **Frozen builds:** You can instead place **`autoprimenet_gui.exe` next to `autoprimenet.exe`** produced by [`scripts/build_windows_exe.ps1`](scripts/build_windows_exe.ps1) and run the GUI executable (no Python install required on the target machine).
+
+### macOS
+
+* **tkinter:** The python.org **macOS installers** usually ship Tcl/Tk and tkinter. If `import tkinter` fails (for example with some **Homebrew** Python builds), install a Python build that includes Tcl/Tk or add the matching `tk`/`tcl-tk` packages for your Python version.
+* **Run:** From Terminal, change to the directory that contains `autoprimenet.py` and `autoprimenet_gui.py`, then:
+
+	```sh
+	python3 autoprimenet_gui.py
+	```
+
+### Linux
+
+* **tkinter** is often packaged separately from `python3`:
+	* **Debian / Ubuntu:** `sudo apt install python3-tk`
+	* **Fedora:** `sudo dnf install python3-tkinter`
+	* **Arch Linux:** `sudo pacman -S tk`
+* **Run:** From a shell in the repository (or any directory where both scripts live):
+
+	```sh
+	python3 autoprimenet_gui.py
+	```
+
+	Use `python` instead of `python3` if that is how Python 3 is invoked on your system.
+
+### Optional styling (Python 3)
+
+For a more modern look, install [ttkbootstrap](https://github.com/israel-dryer/ttkbootstrap):
+
+```sh
+pip install ttkbootstrap
+```
+
+If it is not installed, the GUI falls back to standard `tkinter.ttk`.
+
+The GUI covers common options (work directory, PrimeNet user ID, GIMPS program and work preference, check-in interval, days of work, certification and 100M-reporting options, work/results/log paths, trial-factoring bounds, e-mail notifications, and **Output** actions such as **Status** and **Debug info**). It does **not** expose a button to start the long-running assignment loop; for that, run `autoprimenet.py` from a shell with the same work directory and flags (see [Usage](#usage)).
 
 ### First-time PrimeNet registration (without `--setup`)
 
 You can configure `prime.ini` (or the GUI) instead of running `--setup`. PrimeNet still needs your computer registered once.
 
 * **Signal “not registered yet”:** `[PrimeNet]` usually has **no `ComputerGUID`** key. The program uses that value as the instance id after the server accepts registration.
-* **What performs registration:** A **full** AutoPrimeNet run — the same as clicking **Run** in the GUI — loads config, then if `ComputerGUID` is missing it calls **`register_instance`** (PrimeNet “uc”) and writes the returned GUID. This is **not** done by **`--sync-ini`**: the GUI’s background sync only merges hardware/options into `prime.ini` and exits before registration.
-* **Register then stop:** Set **timeout to `0`** (Work Settings in the GUI, or `-t 0` on the CLI). When `ComputerGUID` was missing, the first such run registers and then exits instead of staying in the long-running loop.
+* **What performs registration (command line):** A normal AutoPrimeNet start loads config; if `ComputerGUID` is missing, the program calls **`register_instance`** (PrimeNet “uc”) and writes the returned GUID before continuing. This is **not** done by **`--sync-ini`**: the GUI’s background `--sync-ini` only merges hardware/options into `prime.ini` and exits before registration.
+* **What performs registration (GUI):** The GUI does **not** start the full assignment handler. When prerequisites are met and `ComputerGUID` is still missing, it can run **`autoprimenet --register-only`** in the background (for example after you set user ID and work preference). That registers with PrimeNet without running the monitoring loop.
+* **Register then stop (CLI):** Use **`-t 0`** (timeout zero) so the first run registers (if needed) and then exits instead of staying in the long-running loop.
 * **Note:** If a registration attempt fails partway, a local `ComputerGUID` might already exist in `prime.ini`; that does not always mean the server registration succeeded. The program can retry registration in some error paths when talking to PrimeNet.
 
 ## Contributing
